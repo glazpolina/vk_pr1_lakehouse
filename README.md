@@ -24,8 +24,6 @@
 
 ### Скрипты, которыми поднимал стек
 
-Вставь свои команды (`docker run` / `docker-compose.yml` / shell-скрипт), которыми реально поднял сервисы, с кратким комментарием к каждой.
-
 ```bash
 # MinIO (объектное хранилище)
 docker run -d --name lakehouse-minio -p 9000:9000 -p 9001:9001 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin -v minio-data:/data pgsty/silo:latest server /data --console-address ":9001"
@@ -46,23 +44,13 @@ docker run -d --name metabase -p 3000:3000 metabase/metabase:latest
 
 | Таблица TPC-H | Нужные колонки | Что запрос с ними делает (фильтр / джойн / агрегат / вывод) |
 |---|---|---|
-| | | |
-| | | |
-| | | |
+|customer |custkey, mktsegment | Фильтр (mktsegment = 'BUILDING') и джойн с orders по custkey|
+|orders |orderkey, custkey, orderdate, shippriority |Фильтр по дате (orderdate < 1995-03-15), джойн с customer и lineitem. Вывод orderdate и shippriority. |
+|lineitem |orderkey, extendedprice, discount, shipdate |Фильтр по дате (shipdate > 1995-03-15), джойн по orderkey. Вычисление выручки (extendedprice * (1 - discount)) и агрегат sum(). |
 
 ## 4. Медальон — решения по каждому слою
 
-Как заполнять:
-- **Строк** — `SELECT count(*) FROM таблица`;
-- **Вес, МБ** — размер файлов таблицы в MinIO (консоль → бакет → объекты) или `SHOW STATS`;
-- **Формат** — `PARQUET` / `ORC`;
-- **Сжатие** — `NONE` / `SNAPPY` / `GZIP` / `ZSTD`;
-- **Партиционирование** — по какой колонке (или «нет»);
-- **Обоснование** — почему выбрал именно такой формат + сжатие + партиционирование для этого слоя и твоего объёма данных.
-
 ### Bronze (сырой)
-
-Добавь строку на каждую таблицу, которую залил в Bronze.
 
 | Таблица | Колонки (что оставил) | Строк | Вес, МБ | Формат | Сжатие | Партиционирование | Обоснование |
 |---|---|---|---|---|---|---|---|
@@ -70,6 +58,9 @@ docker run -d --name metabase -p 3000:3000 metabase/metabase:latest
 | bronze_orders_gzip | orderkey, custkey, orderdate, shippriority | 7500000 | 43,7 | PARQUET | GZIP | нет | Сырые данные, которые нужны для Q3. |
 | bronze_lineitem_gzip | orderkey, extendedprice, discount, shipdate | 29999795 | 189,3 | PARQUET | GZIP | нет | Сырые данные, которые нужны для Q3.|
 | | | | | | | | |
+| bronze_customer_zstd| custkey, mktsegment|750000 |1,0 |PARQUET  |ZSTD | нет|ZSTD — современный кодек, лучше жмет и быстрее читается. |
+| bronze_orders_zstd| orderkey, custkey, orderdate, shippriority|7500000 |40,0 |PARQUET  |ZSTD | нет|ZSTD — современный кодек, лучше жмет и быстрее читается. |
+|bronze_lineitem_zstd | orderkey, extendedprice, discount, shipdate| 29 999 795| 191,1 |PARQUET  |ZSTD | нет|ZSTD — современный кодек, лучше жмет и быстрее читается. |
 
 ### Silver (очищенный)
 
@@ -92,8 +83,6 @@ docker run -d --name metabase -p 3000:3000 metabase/metabase:latest
 | GZIP | 32,99| 234,3 | GZIP дает чуть меньший размер на самой большой таблице, но распаковывается медленнее.|
 | ZSTD | 30,46| 232,1| ZSTD - лучший выбор: файлы в сумме меньше, и читаются они на 2,5 секунды быстрее благодаря современному алгоритму распаковки|
 
-> Время запроса удобно смотреть в логах Trino (`docker logs trino`) или через `system.runtime.queries`.
-
 ## 6. Часть 2 — осмысление и работа с инструментами
 
 ### 6.1. Понять и объяснить
@@ -101,8 +90,8 @@ docker run -d --name metabase -p 3000:3000 metabase/metabase:latest
 | Вопрос | Твой ответ  |
 |---|---|
 | Зачем нужны большие данные и lakehouse (а не обычная БД/хранилище)? | |
-| Пример schema evolution на Silver: добавил/переименовал колонку — что произошло? | |
-| Пример скрипта восстановления данных из снапшота (time travel) | |
+| Пример schema evolution на Silver: добавил/переименовал колонку — что произошло? |При добавлении колонки (ALTER TABLE ADD COLUMN) Iceberg просто обновляет метаданные. Старые parquet-файлы не перезаписываются, при чтении в новой колонке для старых строк возвращается NULL. Это позволяет менять схему без простоя и переливки терабайт данных. |
+| Пример скрипта восстановления данных из снапшота (time travel) |ALTER TABLE lakekeeper.lakehouse.silver_order_lines EXECUTE rollback_to_snapshot(5429817954332802307); (ID снапшота был взят из системной таблицы $snapshots). Этот запрос мгновенно откатывает состояние таблицы к предыдущей версии без перезаписи файлов. |
 
 ### 6.2. Подключить инструмент к lakehouse
 
